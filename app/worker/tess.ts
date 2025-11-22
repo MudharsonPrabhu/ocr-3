@@ -1,9 +1,7 @@
-import { createWorker } from "tesseract.js";
+import { createWorker, Worker } from "tesseract.js";
 
-let worker = null;
-
+let worker: Worker | null = null;
 export const getWorker = async () => {
   if (!worker) worker = await createWorker("eng", 1);
   return worker;
 };
-
