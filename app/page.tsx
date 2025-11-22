@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { computeFrameDiff } from "../lib/diff";
-import { extractZones } from "../lib/crop";
 import { ZONE_ORDER, ZONES } from "../lib/zones";
+import { getWorker } from "./worker/tess";
 
 const CONFIG = {
   frameInterval: 200,
@@ -33,7 +33,6 @@ export default function HomePage() {
   const [status, setStatus] = useState("Initializing camera…");
   const [streaming, setStreaming] = useState(false);
   const [sentCount, setSentCount] = useState(0);
-  const [confidence, setConfidence] = useState<string>("—");
   const [lastSaved, setLastSaved] = useState<string>("—");
   const [lastText, setLastText] = useState<string>("—");
   const [flash, setFlash] = useState(false);
@@ -89,45 +88,69 @@ export default function HomePage() {
       await new Promise((resolve) => setTimeout(resolve, CONFIG.captureDelay));
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const zonesPayload = extractZones(canvas, CONFIG.preprocess);
+      // Get full canvas as base64 image
+      const croppedBase64Image = canvas.toDataURL("image/png");
 
-      setStatus("Uploading to OCR…");
-      const response = await fetch("/api/ocr", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          zones: zonesPayload,
-          meta: {
-            capturedAt: new Date().toISOString(),
-            devicePixelRatio: window.devicePixelRatio
-          }
-        })
-      });
+      setStatus("Processing OCR…");
 
-      const json = await response.json();
-
-      if (!response.ok || !json.saved) {
-        throw new Error(json.error || "OCR failed");
-      }
-
-      setSentCount((cnt) => cnt + 1);
-      setLastText(json.text || "—");
-      setLastSaved(json.timestamp || new Date().toISOString());
-      setConfidence(
-        typeof json.confidence === "number" ? `${json.confidence}%` : "—"
-      );
-      setStatus("Saved ✓ — waiting for next sheet");
-      setShowResult(true);
-      window.setTimeout(() => setShowResult(false), 5000);
+      // Optional OCR preprocessing: contrast, brightness, grayscale
+      const img = new Image();
+      img.src = croppedBase64Image;
+      await img.decode();
       
+      const canvas2 = document.createElement("canvas");
+      canvas2.width = img.width;
+      canvas2.height = img.height;
+      const ctx2 = canvas2.getContext("2d");
+      if (!ctx2) throw new Error("Canvas context unavailable");
+      
+      ctx2.filter = "contrast(200%) brightness(140%) grayscale(100%)";
+      ctx2.drawImage(img, 0, 0);
+      const processed = canvas2.toDataURL("image/png");
+
+      // Perform OCR with Tesseract.js
+      const worker = await getWorker();
+      const { data: { text } } = await worker.recognize(processed);
+
+      // Clean the text
+      const cleaned = text
+        .replace(/\n\s*\n/g, '\n')
+        .trim();
+
       // Immediately show OCR result in UI
-      setLatestScan(json.text || "");
-      setLatestTimestamp(json.timestamp || new Date().toISOString());
+      setLatestScan(cleaned);
+      const timestamp = new Date().toISOString();
+      setLatestTimestamp(timestamp);
+      
       // Use requestAnimationFrame to ensure smooth fade-in animation
       requestAnimationFrame(() => {
         setShowResultPanel(true);
         window.setTimeout(() => setShowResultPanel(false), 5000);
       });
+
+      // Save to Firebase
+      setStatus("Saving to Firebase…");
+      const response = await fetch("/api/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: cleaned,
+          timestamp: Date.now(),
+        }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.saved) {
+        throw new Error(json.error || "Save failed");
+      }
+
+      setSentCount((cnt) => cnt + 1);
+      setLastText(cleaned || "—");
+      setLastSaved(timestamp);
+      setStatus("Saved ✓ — waiting for next sheet");
+      setShowResult(true);
+      window.setTimeout(() => setShowResult(false), 5000);
       
       fetchHistory();
     } catch (error) {
